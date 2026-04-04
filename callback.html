@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BPM Sync — Connexion</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'DM Sans', system-ui, sans-serif;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 16px;
+      color: #000;
+    }
+    .logo { font-size: 36px; font-weight: 700; letter-spacing: -1px; }
+    .msg  { font-size: 14px; color: #666; }
+    .spinner {
+      width: 28px; height: 28px;
+      border: 2.5px solid #e0e0e0;
+      border-top-color: #000;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="logo">BPM</div>
+  <div class="spinner"></div>
+  <div class="msg" id="msg">Connexion à Spotify en cours…</div>
+
+  <script>
+    // Récupère les paramètres de l'URL
+    const params  = new URLSearchParams(window.location.search);
+    const code    = params.get('code');
+    const error   = params.get('error');
+
+    if (error) {
+      document.getElementById('msg').textContent = 'Connexion annulée.';
+      setTimeout(() => window.location.href = 'index.html', 1500);
+
+    } else if (code) {
+      // Échange le code contre un token
+      const CLIENT_ID    = 'bef3899241db4e618883042e808327a2';
+      const REDIRECT_URI = 'http://127.0.0.1:5500/callback.html';
+      const verifier     = sessionStorage.getItem('pkce_verifier');
+
+      fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type:    'authorization_code',
+          code,
+          redirect_uri:  REDIRECT_URI,
+          client_id:     CLIENT_ID,
+          code_verifier: verifier,
+        }),
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.access_token) {
+          localStorage.setItem('spotify_token',        data.access_token);
+          localStorage.setItem('spotify_refresh_token', data.refresh_token || '');
+          localStorage.setItem('spotify_token_expiry',  Date.now() + data.expires_in * 1000);
+          document.getElementById('msg').textContent = 'Connecté ✓ Redirection…';
+          window.location.href = 'index.html';
+        } else {
+          document.getElementById('msg').textContent = 'Erreur : ' + (data.error_description || 'token invalide');
+          setTimeout(() => window.location.href = 'index.html', 2000);
+        }
+      })
+      .catch(() => {
+        document.getElementById('msg').textContent = 'Erreur réseau. Réessaie.';
+        setTimeout(() => window.location.href = 'index.html', 2000);
+      });
+
+    } else {
+      window.location.href = 'index.html';
+    }
+  </script>
+</body>
+</html>
