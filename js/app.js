@@ -1,6 +1,9 @@
 /**
- * BPM SYNC — App.js v3
- * Fix : chargement données Spotify, previews 30s, navigation unifiée
+ * BPM SYNC — App.js v4
+ * - Covers depuis Deezer sur toutes les tracks
+ * - Enchaînement automatique des morceaux
+ * - Musique adaptée au BPM en session
+ * - Clic sur n'importe quelle track → lecture
  */
 
 // ═══════════════════════════════════════════════════════
@@ -9,19 +12,21 @@
 const State = {
   currentScreen:    'login',
   sessionActive:    false,
-  bpm:              null,
+  bpm:              68,
   bpmSource:        'simulator',
   spotifyConnected: false,
   watchConnected:   false,
   watchName:        null,
-  steps:            1543,
+  steps:            0,
   stepsGoal:        10000,
   streak:           10,
   recentTracks:     [],
   recoTracks:       [],
   playlists:        [],
-  currentPreview:   null, // Audio en cours de lecture (preview 30s)
+  queue:            [], // file de lecture en session
+  queueIndex:       0,
   isPlaying:        false,
+  currentTrackInfo: null,
   map:              null,
   mapPolyline:      null,
   mapMarker:        null,
@@ -34,7 +39,7 @@ const State = {
 const $  = id => document.getElementById(id);
 const on = (el, ev, fn) => el && el.addEventListener(ev, fn);
 
-function showToast(msg, duration = 2600) {
+function showToast(msg, duration = 2400) {
   const t = $('toast');
   if (!t) return;
   t.textContent = msg;
@@ -43,30 +48,137 @@ function showToast(msg, duration = 2600) {
 }
 
 function esc(str) {
-  return (str || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+  return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
 function coverPlaceholder(name, fontSize = '11px') {
-  return `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.45);font-size:${fontSize};font-weight:600;text-align:center;padding:4px">${(name||'').substring(0,12)}</div>`;
+  const initials = (name || '??').split(' ').slice(0, 2).map(w => w[0] || '').join('').toUpperCase();
+  return `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.5);font-size:${fontSize};font-weight:700;letter-spacing:1px">${initials}</div>`;
 }
 
 // ═══════════════════════════════════════════════════════
-//  NAVIGATION — source unique de vérité
+//  PLAYER — enchaînement, BPM adaptatif, file de lecture
+// ═══════════════════════════════════════════════════════
+const Player = (() => {
+  let audio    = null;
+  const cbs    = new Set();
+
+  function emit(data) { cbs.forEach(fn => fn(data)); }
+
+  function playAudio(url, info, onEnd) {
+    if (audio) { audio.pause(); audio.src = ''; }
+
+    audio = new Audio(url);
+    audio.volume = 0.8;
+    audio.crossOrigin = 'anonymous';
+
+    audio.addEventListener('canplay', () => {
+      audio.play().then(() => {
+        State.isPlaying      = true;
+        State.currentTrackInfo = info;
+        emit({ playing: true, track: info });
+        updateNowPlayingBar(info);
+      }).catch(err => {
+        console.error('[Player]', err);
+        showToast('Autoplay bloqué — tape l\'écran pour lancer');
+      });
+    });
+
+    audio.addEventListener('ended', () => {
+      State.isPlaying = false;
+      emit({ playing: false, track: null });
+      if (onEnd) onEnd();
+    });
+
+    audio.addEventListener('error', () => {
+      console.warn('[Player] Erreur audio, on passe au suivant');
+      if (onEnd) onEnd();
+    });
+
+    audio.load();
+  }
+
+  return {
+    // Joue un morceau unique (clic depuis liste)
+    playOne(url, info) {
+      if (!url) { showToast('Pas d\'extrait disponible pour ce morceau'); return; }
+      playAudio(url, info, null);
+    },
+
+    // Lance une file de lecture (session)
+    playQueue(tracks) {
+      const withPreview = tracks.filter(t => t.previewUrl);
+      if (!withPreview.length) { showToast('Aucun extrait disponible'); return; }
+      State.queue      = withPreview;
+      State.queueIndex = 0;
+      this._playIndex(0);
+    },
+
+    _playIndex(idx) {
+      if (idx >= State.queue.length) {
+        // Fin de la file → on reboucle
+        State.queueIndex = 0;
+        this._playIndex(0);
+        return;
+      }
+      State.queueIndex = idx;
+      const t = State.queue[idx];
+      playAudio(t.previewUrl, { name: t.name, artist: t.artist, image: t.image }, () => {
+        // Enchaîne au suivant automatiquement
+        setTimeout(() => this._playIndex(idx + 1), 500);
+      });
+    },
+
+    next() {
+      if (!State.queue.length) return;
+      this._playIndex((State.queueIndex + 1) % State.queue.length);
+    },
+
+    prev() {
+      if (!State.queue.length) return;
+      this._playIndex((State.queueIndex - 1 + State.queue.length) % State.queue.length);
+    },
+
+    pause()  { if (audio) { audio.pause(); State.isPlaying = false; emit({ playing: false }); } },
+    resume() { if (audio) { audio.play();  State.isPlaying = true;  emit({ playing: true  }); } },
+    toggle() { audio?.paused ? this.resume() : this.pause(); },
+
+    stop() {
+      if (audio) { audio.pause(); audio.src = ''; audio = null; }
+      State.isPlaying       = false;
+      State.currentTrackInfo = null;
+      State.queue           = [];
+      emit({ playing: false, track: null });
+      updateNowPlayingBar(null);
+    },
+
+    isActive() { return audio && !audio.paused; },
+    onChange(fn) { cbs.add(fn); return () => cbs.delete(fn); },
+  };
+})();
+
+function updateNowPlayingBar(track) {
+  const titleEl = $('now-playing-title');
+  if (!titleEl) return;
+  titleEl.textContent = track
+    ? `${track.name} — ${track.artist}`
+    : 'Connecte Spotify pour lancer la musique';
+}
+
+on($('now-playing-bar'), 'click', () => {
+  if (State.queue.length) Player.toggle();
+  else navigateTo('music');
+});
+
+// ═══════════════════════════════════════════════════════
+//  NAVIGATION
 // ═══════════════════════════════════════════════════════
 const SCREENS = {
-  login:    'screen-login',
-  play:     'screen-play',
-  session:  'screen-session',
-  music:    'screen-music',
-  sport:    'screen-sport',
-  history:  'screen-history',
-  settings: 'screen-settings',
+  login:'screen-login', play:'screen-play', session:'screen-session',
+  music:'screen-music', sport:'screen-sport', history:'screen-history', settings:'screen-settings',
 };
-
 const NAV_ACTIVE = {
-  play: 'play', session: 'play',
-  music: 'music', sport: 'sport',
-  history: 'history', settings: 'settings',
+  play:'play', session:'play', music:'music', sport:'sport', history:'history', settings:'settings',
 };
 
 function navigateTo(key) {
@@ -75,13 +187,11 @@ function navigateTo(key) {
   $(SCREENS[key]).classList.add('active');
   State.currentScreen = key;
 
-  // Sync nav bar
   const navActive = NAV_ACTIVE[key] || key;
   document.querySelectorAll('.nav-item[data-nav]').forEach(item =>
     item.classList.toggle('active', item.dataset.nav === navActive)
   );
 
-  // Side-effects
   if (key === 'music')    renderMusicScreen();
   if (key === 'sport')    initSportScreen();
   if (key === 'history')  renderHistoryScreen();
@@ -91,16 +201,12 @@ function navigateTo(key) {
 }
 
 function resolveNav(dest) {
-  if (dest === 'play') return State.sessionActive ? 'session' : 'play';
-  return dest;
+  return dest === 'play' ? (State.sessionActive ? 'session' : 'play') : dest;
 }
 
-// Bind tous les nav-items
 document.querySelectorAll('.nav-item[data-nav]').forEach(item =>
   on(item, 'click', () => navigateTo(resolveNav(item.dataset.nav)))
 );
-
-// Bind tous les tabs
 document.querySelectorAll('.tab[data-tab]').forEach(tab =>
   on(tab, 'click', () => {
     const MAP = { play:'play', music:'music', sport:'sport' };
@@ -108,9 +214,7 @@ document.querySelectorAll('.tab[data-tab]').forEach(tab =>
   })
 );
 
-// Drawer
-const drawer        = $('drawer');
-const drawerOverlay = $('drawer-overlay');
+const drawer = $('drawer'), drawerOverlay = $('drawer-overlay');
 function openDrawer()  { drawer?.classList.add('open'); drawerOverlay?.classList.add('open'); }
 function closeDrawer() { drawer?.classList.remove('open'); drawerOverlay?.classList.remove('open'); }
 on(drawerOverlay, 'click', closeDrawer);
@@ -118,202 +222,98 @@ document.querySelectorAll('.hamburger').forEach(h => on(h, 'click', openDrawer))
 document.querySelectorAll('.drawer-item[data-nav]').forEach(item =>
   on(item, 'click', () => navigateTo(resolveNav(item.dataset.nav)))
 );
-
-// Boutons retour
 on($('btn-back-history'),  'click', () => navigateTo('music'));
 on($('btn-back-settings'), 'click', () => navigateTo(State.sessionActive ? 'session' : 'play'));
-
-// ═══════════════════════════════════════════════════════
-//  LECTURE PREVIEW 30 SECONDES
-//  Alternative gratuite au Web Playback SDK (pas besoin de Premium)
-// ═══════════════════════════════════════════════════════
-const Preview = (() => {
-  let audio    = null;
-  let listeners = new Set();
-
-  function emit(data) { listeners.forEach(fn => fn(data)); }
-
-  return {
-    play(previewUrl, trackInfo) {
-      // Arrête ce qui joue déjà
-      if (audio) { audio.pause(); audio = null; }
-      if (!previewUrl) { showToast('Pas de preview disponible pour ce morceau'); return; }
-
-      audio = new Audio(previewUrl);
-      audio.volume = 0.8;
-
-      audio.addEventListener('ended', () => {
-        State.isPlaying = false;
-        emit({ playing: false, track: null });
-        updateNowPlayingBar(null);
-      });
-
-      audio.addEventListener('error', () => {
-        showToast('Erreur lecture — essaie un autre morceau');
-        State.isPlaying = false;
-      });
-
-      audio.play().then(() => {
-        State.isPlaying   = true;
-        State.currentPreview = { audio, trackInfo };
-        emit({ playing: true, track: trackInfo });
-        updateNowPlayingBar(trackInfo);
-        showToast(`▶ ${trackInfo.name} (extrait 30s)`);
-      }).catch(() => {
-        showToast('Lecture bloquée — interagis d\'abord avec la page');
-      });
-    },
-
-    pause() {
-      if (audio && !audio.paused) { audio.pause(); State.isPlaying = false; emit({ playing: false }); }
-    },
-
-    resume() {
-      if (audio && audio.paused) { audio.play(); State.isPlaying = true; emit({ playing: true }); }
-    },
-
-    toggle() {
-      if (!audio) return;
-      audio.paused ? this.resume() : this.pause();
-    },
-
-    stop() {
-      if (audio) { audio.pause(); audio = null; }
-      State.isPlaying = false;
-      State.currentPreview = null;
-      emit({ playing: false, track: null });
-      updateNowPlayingBar(null);
-    },
-
-    onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-  };
-})();
-
-function updateNowPlayingBar(track) {
-  const el = $('now-playing-title');
-  if (!el) return;
-  el.textContent = track
-    ? `${track.name} — ${track.artist}`
-    : 'Connecte Spotify pour lancer la musique';
-}
-
-// Clic sur la barre musique en cours → play/pause
-on($('now-playing-bar'), 'click', () => {
-  if (State.isPlaying) Preview.toggle();
-  else navigateTo('music');
-});
 
 // ═══════════════════════════════════════════════════════
 //  LOGIN
 // ═══════════════════════════════════════════════════════
 let isSignup = true;
-
 on($('login-toggle'), 'click', () => {
   isSignup = !isSignup;
   $('login-mode-label').textContent = isSignup ? 'Créer un compte' : 'Se connecter';
   $('login-toggle').textContent     = isSignup ? 'Se connecter'    : 'Créer un compte';
 });
-
 on($('btn-continue'), 'click', () => {
   const email = $('login-email')?.value.trim();
   if (!email?.includes('@')) { showToast('Saisis un e-mail valide'); return; }
   showToast('Connexion en cours…');
   setTimeout(() => enterApp(false), 900);
 });
-
 on($('btn-spotify'),  'click', async () => { showToast('Redirection vers Spotify…'); await SpotifyManager.login(); });
 on($('btn-deezer'),   'click', () => showToast('Deezer — bientôt disponible'));
 on($('btn-youtube'),  'click', () => showToast('YouTube Music — bientôt disponible'));
 
 // ═══════════════════════════════════════════════════════
-//  ENTER APP — point d'entrée après login
+//  ENTER APP
 // ═══════════════════════════════════════════════════════
 async function enterApp(withSpotify = false) {
   State.spotifyConnected = withSpotify;
   BpmSimulator.start();
   navigateTo('play');
 
-  if (withSpotify) {
-    showToast('Chargement de tes musiques…');
-    try {
+  showToast('Chargement des musiques…');
+  try {
+    if (withSpotify) {
       await loadSpotifyData();
       updateSpotifySettingsUI(true);
-    } catch (e) {
-      console.error('[enterApp]', e);
-      showToast('Erreur chargement — on utilise Deezer');
+    } else {
       await loadDeezerFallback();
     }
-  } else {
-    // Sans Spotify : charge le chart Deezer directement
-    showToast('Chargement des musiques…');
-    await loadDeezerFallback();
     showToast('Musiques prêtes ✓');
-  }
-}
-
-async function loadDeezerFallback() {
-  try {
-    const chart = await DeezerManager.getChart(20);
-    if (chart.length) {
-      State.recentTracks = chart;
-      // Genres populaires
-      const GENRES = ['pop', 'rap', 'electronic', 'rnb'];
-      State.playlists = await Promise.all(GENRES.map(async genre => {
-        const tracks = await DeezerManager.getTracksByGenre(genre, 12);
-        return { name: genre.charAt(0).toUpperCase() + genre.slice(1), count: tracks.length, image: tracks[0]?.image || null, tracks };
-      }));
-    }
   } catch (e) {
-    console.error('[loadDeezerFallback]', e);
+    console.error('[enterApp]', e);
+    await loadDeezerFallback().catch(() => {});
   }
 }
 
 // ═══════════════════════════════════════════════════════
-//  CHARGEMENT DONNÉES SPOTIFY
+//  CHARGEMENT DONNÉES
 // ═══════════════════════════════════════════════════════
 async function loadSpotifyData() {
-  // 1. Écoutes récentes depuis Spotify
+  // 1. Écoutes récentes Spotify → enrichies avec covers + previews Deezer
   const recent = await SpotifyManager.getRecentlyPlayed(20);
   if (recent.length) {
-    // Enrichit immédiatement avec les previews Deezer
-    showToast('Chargement des extraits musicaux…');
     State.recentTracks = await DeezerManager.enrichWithPreviews(recent, 4);
-    console.log('[Data] Tracks récentes :', State.recentTracks.length,
-      '— avec preview :', State.recentTracks.filter(t => t.previewUrl).length);
   }
 
-  // 2. Recommandations Spotify + enrichissement Deezer
-  if (recent.length) {
-    const seedIds = recent.slice(0, 5).map(t => t.id).filter(Boolean);
-    if (seedIds.length) {
-      const recos = await SpotifyManager.getRecommendations(seedIds);
-      State.recoTracks = await DeezerManager.enrichWithPreviews(recos, 4);
-    }
+  // 2. Recommandations
+  const seedIds = recent.slice(0, 5).map(t => t.id).filter(Boolean);
+  if (seedIds.length) {
+    const recos = await SpotifyManager.getRecommendations(seedIds);
+    State.recoTracks = await DeezerManager.enrichWithPreviews(recos, 4);
   }
 
-  // 3. Genres → playlists avec tracks Deezer (previews garantis)
+  // 3. Playlists par genre
   const spotifyGenres = await SpotifyManager.getTopGenres();
   if (spotifyGenres.length) {
-    // Enrichit les tracks de chaque genre avec Deezer
     State.playlists = await Promise.all(spotifyGenres.map(async g => ({
       ...g,
       tracks: await DeezerManager.enrichWithPreviews(g.tracks || [], 3),
     })));
   } else {
-    // Fallback : genres Deezer populaires directement
-    const GENRES_FALLBACK = ['pop', 'rap', 'electronic', 'rnb'];
-    State.playlists = await Promise.all(GENRES_FALLBACK.map(async genre => {
-      const tracks = await DeezerManager.getTracksByGenre(genre, 15);
-      return {
-        name:   genre.charAt(0).toUpperCase() + genre.slice(1),
-        count:  tracks.length,
-        image:  tracks[0]?.image || null,
-        tracks,
-      };
-    }));
+    await buildDeezerPlaylists();
   }
+}
 
-  showToast('Musiques chargées ✓');
+async function loadDeezerFallback() {
+  const chart = await DeezerManager.getChart(20);
+  State.recentTracks = chart;
+  State.recoTracks   = await DeezerManager.getChart(16); // section recos aussi
+  await buildDeezerPlaylists();
+}
+
+async function buildDeezerPlaylists() {
+  const GENRES = ['pop', 'rap', 'electronic', 'rnb'];
+  State.playlists = await Promise.all(GENRES.map(async genre => {
+    const tracks = await DeezerManager.getTracksByGenre(genre, 15);
+    return {
+      name:   genre.charAt(0).toUpperCase() + genre.slice(1),
+      count:  tracks.length,
+      image:  tracks[0]?.image || null,
+      tracks,
+    };
+  }));
 }
 
 // ═══════════════════════════════════════════════════════
@@ -321,7 +321,7 @@ async function loadSpotifyData() {
 // ═══════════════════════════════════════════════════════
 on($('ble-status-btn'), 'click', async () => {
   if (State.watchConnected) { await BluetoothManager.disconnect(); return; }
-  if (!BluetoothManager.isSupported()) { showToast('WebBluetooth non dispo — utilise Chrome Android'); return; }
+  if (!BluetoothManager.isSupported()) { showToast('Utilise Chrome Android pour le Bluetooth'); return; }
   setBleUI('searching');
   try {
     const name = await BluetoothManager.connect();
@@ -330,7 +330,7 @@ on($('ble-status-btn'), 'click', async () => {
     showToast(`${name} connectée ✓`);
   } catch (err) {
     setBleUI('disconnected');
-    if (err.name !== 'NotFoundError') showToast('Connexion échouée — simulation activée');
+    if (err.name !== 'NotFoundError') showToast('Connexion échouée');
   }
 });
 
@@ -340,18 +340,18 @@ function setBleUI(status, name = '') {
   const chip = $('watch-chip');
   const lbl  = $('ble-settings-label');
   if (status === 'connected') {
-    if (dot)  { dot.className = 'ble-dot connected'; }
-    if (text) text.textContent = name || 'Montre connectée';
-    if (chip) chip.textContent = (name || 'Montre') + ' connectée';
-    if (lbl)  lbl.textContent  = name || 'Connectée';
+    if (dot)  dot.className     = 'ble-dot connected';
+    if (text) text.textContent  = name || 'Montre connectée';
+    if (chip) chip.textContent  = (name || 'Montre') + ' connectée';
+    if (lbl)  lbl.textContent   = name || 'Connectée';
   } else if (status === 'searching') {
-    if (dot)  { dot.className = 'ble-dot searching'; }
-    if (text) text.textContent = 'Recherche…';
+    if (dot)  dot.className     = 'ble-dot searching';
+    if (text) text.textContent  = 'Recherche…';
   } else {
-    if (dot)  { dot.className = 'ble-dot'; }
-    if (text) text.textContent = 'Connecter une montre';
-    if (chip) chip.textContent = 'Montre non connectée';
-    if (lbl)  lbl.textContent  = 'Non connectée';
+    if (dot)  dot.className     = 'ble-dot';
+    if (text) text.textContent  = 'Connecter une montre';
+    if (chip) chip.textContent  = 'Montre non connectée';
+    if (lbl)  lbl.textContent   = 'Non connectée';
   }
 }
 
@@ -379,32 +379,8 @@ function startSession() {
   State.simStopFn = SensorsManager.simulateSteps();
   navigateTo('session');
   showToast('Session démarrée ✓');
-
-  // Lance automatiquement la première musique avec preview dispo
-  setTimeout(() => autoPlayFirstTrack(), 800);
-}
-
-function autoPlayFirstTrack() {
-  // Cherche la première track avec preview dans les écoutes récentes
-  const allTracks = [
-    ...State.recentTracks,
-    ...(State.playlists.flatMap(p => p.tracks || [])),
-    ...State.recoTracks,
-  ];
-  const track = allTracks.find(t => t.previewUrl);
-
-  if (track) {
-    Preview.play(track.previewUrl, { name: track.name, artist: track.artist });
-  } else if (!State.spotifyConnected) {
-    // Sans Spotify : charge le chart Deezer et joue le premier
-    DeezerManager.getChart(10).then(chart => {
-      if (chart.length) {
-        const t = chart[0];
-        State.recentTracks = chart;
-        Preview.play(t.previewUrl, { name: t.name, artist: t.artist });
-      }
-    });
-  }
+  // Lance la file de lecture adaptée au BPM après un court délai
+  setTimeout(() => launchSessionQueue(), 800);
 }
 
 function stopSession() {
@@ -412,19 +388,101 @@ function stopSession() {
   BpmSimulator.stopSession();
   SensorsManager.stopGps();
   SensorsManager.stopPedometer();
-  Preview.stop();
+  Player.stop();
   if (State.simStopFn) { State.simStopFn(); State.simStopFn = null; }
   navigateTo('play');
   showToast('Session terminée');
 }
 
+// Lance la file de lecture adaptée au BPM actuel
+function launchSessionQueue() {
+  const queue = buildQueueForBpm(State.bpm);
+  if (queue.length) {
+    Player.playQueue(queue);
+  } else {
+    // Fallback : toutes les tracks dispo
+    const allTracks = getAllTracksWithPreview();
+    if (allTracks.length) Player.playQueue(allTracks);
+  }
+}
+
+// Construit une file de tracks adaptée au BPM
+// BPM < 80 → musique calme (bossa nova, pop douce)
+// BPM 80-120 → mix pop / rnb
+// BPM > 120 → énergie (rap, électro)
+function buildQueueForBpm(bpm) {
+  const allTracks = getAllTracksWithPreview();
+  if (!allTracks.length) return [];
+
+  // Si on a des playlists par genre, on choisit selon le BPM
+  if (State.playlists.length) {
+    let targetGenre = null;
+    if (bpm < 80)       targetGenre = State.playlists.find(p => /bossa|jazz|chill|soul/i.test(p.name));
+    else if (bpm < 110) targetGenre = State.playlists.find(p => /pop|rnb|r&b/i.test(p.name));
+    else                targetGenre = State.playlists.find(p => /rap|electro|hip/i.test(p.name));
+
+    if (targetGenre?.tracks?.length) {
+      const withPreview = targetGenre.tracks.filter(t => t.previewUrl);
+      if (withPreview.length >= 3) return shuffle(withPreview);
+    }
+  }
+
+  // Sinon : toutes les tracks mélangées
+  return shuffle(allTracks);
+}
+
+// Quand le BPM change de zone en session → adapte la musique
+let lastBpmZone = '';
+BpmSimulator.onChange(({ bpm, zone, color, bg, conseil }) => {
+  if (State.bpmSource === 'simulator') updateBpmEverywhere(bpm, 'simulator', { zone, color, bg, conseil });
+
+  // Change la file de lecture si on change de zone cardio en session
+  if (State.sessionActive && zone !== lastBpmZone) {
+    lastBpmZone = zone;
+    if (State.queue.length) {
+      const newQueue = buildQueueForBpm(bpm);
+      if (newQueue.length) {
+        State.queue      = newQueue;
+        State.queueIndex = 0;
+        // Ne coupe pas la musique en cours, changement au prochain morceau
+      }
+    }
+  }
+});
+
+// Idem pour la vraie montre
+BluetoothManager.onBpm(({ bpm }) => {
+  updateBpmEverywhere(bpm, 'watch');
+  if (State.sessionActive) {
+    const zone = BpmSimulator.getZone().label;
+    if (zone !== lastBpmZone) {
+      lastBpmZone = zone;
+      const newQueue = buildQueueForBpm(bpm);
+      if (newQueue.length) { State.queue = newQueue; State.queueIndex = 0; }
+    }
+  }
+});
+
+function getAllTracksWithPreview() {
+  return [
+    ...State.recentTracks,
+    ...State.recoTracks,
+    ...(State.playlists.flatMap(p => p.tracks || [])),
+  ].filter(t => t.previewUrl);
+}
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 // ═══════════════════════════════════════════════════════
 //  BPM DISPLAY
 // ═══════════════════════════════════════════════════════
-BpmSimulator.onChange(({ bpm, zone, color, bg, conseil }) => {
-  if (State.bpmSource === 'simulator') updateBpmEverywhere(bpm, 'simulator', { zone, color, bg, conseil });
-});
-
 function updateBpmEverywhere(bpm, source, meta = null) {
   State.bpm = bpm; State.bpmSource = source;
   if (!meta) {
@@ -441,8 +499,8 @@ function updateBpmEverywhere(bpm, source, meta = null) {
   if (zoneEl) { zoneEl.textContent = meta.zone; zoneEl.style.background = meta.bg; zoneEl.style.color = meta.color; }
   const cEl = $('conseil-text');
   if (cEl && meta.conseil) cEl.textContent = meta.conseil;
-  const mVal = $('music-bpm-val'); if (mVal) mVal.textContent = bpm;
-  const mSt  = $('music-bpm-state'); if (mSt) mSt.textContent = meta.zone;
+  const mVal = $('music-bpm-val');   if (mVal) mVal.textContent = bpm;
+  const mSt  = $('music-bpm-state'); if (mSt)  mSt.textContent = meta.zone;
 }
 
 function conseilForBpm(bpm) {
@@ -473,46 +531,74 @@ function renderSteps(count) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  ÉCRAN MUSIQUE
+//  RENDER MUSIQUE
 // ═══════════════════════════════════════════════════════
 on($('btn-see-history'), 'click', () => navigateTo('history'));
 on($('add-to-spotify'),  'click', async () => {
   if (!State.spotifyConnected) { showToast('Connecte Spotify d\'abord'); return; }
-  if (!State.recentTracks.length) { showToast('Aucune musique à ajouter'); return; }
-  showToast('Création de la playlist…');
   const uris = State.recentTracks.map(t => t.uri).filter(Boolean);
-  const pl   = await SpotifyManager.createPlaylist('BPM Sync — Mes écoutes', uris);
+  if (!uris.length) { showToast('Aucune musique à ajouter'); return; }
+  showToast('Création de la playlist…');
+  const pl = await SpotifyManager.createPlaylist('BPM Sync — Mes écoutes', uris);
   showToast(pl ? 'Playlist créée sur Spotify ✓' : 'Erreur lors de la création');
 });
 
 function renderMusicScreen() {
   renderSteps(State.steps);
-  const hasTracks = State.recentTracks.length > 0;
-  renderRecentAlbums(hasTracks ? State.recentTracks : null);
+  renderRecentAlbums(State.recentTracks.length ? State.recentTracks : null);
   renderPlaylists(State.playlists.length ? State.playlists : null);
 }
 
-// ─── Albums récents ───
-function renderRecentAlbums(tracks) {
-  const container = $('recent-albums');
-  if (!container) return;
-  const data = tracks || SpotifyManager.getMockRecentTracks();
-  container.innerHTML = data.slice(0, 8).map(t => {
-    const hasImage   = !!t.image;
-    const hasPreview = !!t.previewUrl;
-    return `
-    <div class="album-item" onclick="${hasPreview ? `playPreview('${esc(t.previewUrl)}','${esc(t.name)}','${esc(t.artist||'')}')` : `showToast('Pas de preview pour ce morceau')`}">
-      <div class="album-art" style="width:80px;height:80px;background:${t.color||'#222'};position:relative">
-        ${hasImage ? `<img src="${t.image}" alt="${esc(t.name)}" style="width:100%;height:100%;object-fit:cover;display:block">` : coverPlaceholder(t.name)}
-        ${hasPreview ? `<div style="position:absolute;bottom:4px;right:4px;width:18px;height:18px;background:rgba(0,0,0,.7);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="white" width="10" height="10"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>` : ''}
+// ─── Rendu d'une track (cover + bouton play) ───
+function trackHTML(t, size = 80) {
+  const hasPreview = !!t.previewUrl;
+  const onclick    = hasPreview
+    ? `window._playTrack('${esc(t.previewUrl)}','${esc(t.name)}','${esc(t.artist||'')}','${esc(t.image||'')}')`
+    : `showToast('Pas d\\'extrait pour ce morceau')`;
+  return `
+    <div class="album-item" onclick="${onclick}" style="cursor:pointer">
+      <div class="album-art" style="width:${size}px;height:${size}px;background:#222;position:relative">
+        ${t.image
+          ? `<img src="${t.image}" alt="${esc(t.name)}" style="width:100%;height:100%;object-fit:cover;display:block">`
+          : coverPlaceholder(t.name)}
+        ${hasPreview ? `<div style="position:absolute;bottom:4px;right:4px;width:20px;height:20px;background:rgba(0,0,0,.75);border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg viewBox="0 0 24 24" fill="white" width="10" height="10"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>` : ''}
       </div>
       <div class="album-name">${t.name}</div>
       <div class="album-artist">${t.artist||''}</div>
     </div>`;
-  }).join('');
 }
 
-// ─── Playlists par genre ───
+// Même chose en format grille (historique)
+function trackGridHTML(t) {
+  const hasPreview = !!t.previewUrl;
+  const onclick    = hasPreview
+    ? `window._playTrack('${esc(t.previewUrl)}','${esc(t.name)}','${esc(t.artist||'')}','${esc(t.image||'')}')`
+    : `showToast('Pas d\\'extrait pour ce morceau')`;
+  return `
+    <div class="history-item" onclick="${onclick}" style="cursor:pointer">
+      <div style="width:100%;aspect-ratio:1;border-radius:6px;overflow:hidden;background:#222;position:relative">
+        ${t.image
+          ? `<img src="${t.image}" alt="${esc(t.name)}" style="width:100%;height:100%;object-fit:cover">`
+          : coverPlaceholder(t.name, '10px')}
+        ${hasPreview ? `<div style="position:absolute;bottom:3px;right:3px;width:16px;height:16px;background:rgba(0,0,0,.75);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="white" width="8" height="8"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>` : ''}
+      </div>
+      <div class="history-name">${t.name}</div>
+      <div class="history-artist">${t.artist||''}</div>
+    </div>`;
+}
+
+// Fonction globale appelée depuis le HTML inline
+window._playTrack = function(url, name, artist, image) {
+  Player.playOne(url, { name, artist, image: image || null });
+};
+window.showToast = showToast;
+
+function renderRecentAlbums(tracks) {
+  const c = $('recent-albums'); if (!c) return;
+  const data = tracks || SpotifyManager.getMockRecentTracks();
+  c.innerHTML = data.slice(0, 8).map(t => trackHTML(t, 80)).join('');
+}
+
 const GENRE_COLORS = [
   'linear-gradient(135deg,#ff69b4,#da70d6)',
   'linear-gradient(135deg,#333,#111)',
@@ -521,91 +607,66 @@ const GENRE_COLORS = [
 ];
 
 function renderPlaylists(genres) {
-  const container = $('playlists-list');
-  if (!container) return;
-
+  const c = $('playlists-list'); if (!c) return;
   if (genres?.length) {
-    container.innerHTML = genres.slice(0, 4).map((g, i) => `
-      <div class="playlist-item" onclick="playGenrePreview(${i})">
-        <div class="pl-rank">${i+1}</div>
-        <div class="pl-art">
-          ${g.image ? `<img src="${g.image}" alt="${esc(g.name)}" style="width:100%;height:100%;object-fit:cover">` : `<div style="width:100%;height:100%;background:${GENRE_COLORS[i%GENRE_COLORS.length]}"></div>`}
-        </div>
-        <div class="pl-info">
-          <div class="pl-name">${g.name}</div>
-          <div class="pl-count">${g.count||'—'} morceaux</div>
-        </div>
-        <div class="pl-play"><svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
-      </div>
-    `).join('');
+    c.innerHTML = genres.slice(0, 4).map((g, i) => {
+      const firstPreview = g.tracks?.find(t => t.previewUrl);
+      const onclick = firstPreview
+        ? `window._playGenre(${i})`
+        : `showToast('Chargement en cours…')`;
+      return `
+        <div class="playlist-item" onclick="${onclick}" style="cursor:pointer">
+          <div class="pl-rank">${i+1}</div>
+          <div class="pl-art">
+            ${g.image
+              ? `<img src="${g.image}" alt="${esc(g.name)}" style="width:100%;height:100%;object-fit:cover">`
+              : `<div style="width:100%;height:100%;background:${GENRE_COLORS[i%GENRE_COLORS.length]}"></div>`}
+          </div>
+          <div class="pl-info">
+            <div class="pl-name">${g.name}</div>
+            <div class="pl-count">${g.count||g.tracks?.length||'—'} morceaux</div>
+          </div>
+          <div class="pl-play"><svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
+        </div>`;
+    }).join('');
   } else {
-    container.innerHTML = SpotifyManager.getMockPlaylists().map(pl => `
-      <div class="playlist-item" onclick="showToast('Connecte Spotify pour écouter')">
+    c.innerHTML = SpotifyManager.getMockPlaylists().map(pl => `
+      <div class="playlist-item" onclick="showToast('Connecte Spotify ou attends le chargement')" style="cursor:pointer">
         <div class="pl-rank">${pl.rank}</div>
         <div class="pl-art"><div style="width:100%;height:100%;background:${pl.color}"></div></div>
-        <div class="pl-info">
-          <div class="pl-name">${pl.name}</div>
-          <div class="pl-count">${pl.count} morceaux</div>
-        </div>
+        <div class="pl-info"><div class="pl-name">${pl.name}</div><div class="pl-count">${pl.count} morceaux</div></div>
         <div class="pl-play"><svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
-      </div>
-    `).join('');
+      </div>`).join('');
   }
 }
 
-// Joue le premier preview dispo d'un genre
-function playGenrePreview(genreIndex) {
-  const genre = State.playlists[genreIndex];
-  if (!genre?.tracks?.length) { showToast('Aucun extrait disponible'); return; }
-  const track = genre.tracks.find(t => t.previewUrl);
-  if (track) playPreview(track.previewUrl, track.name, track.artist);
-  else showToast('Pas de preview pour ce genre');
-}
-
-// Fonction globale appelée depuis le HTML généré
-window.playPreview = function(url, name, artist) {
-  Preview.play(url, { name, artist });
+window._playGenre = function(idx) {
+  const genre = State.playlists[idx];
+  if (!genre?.tracks?.length) { showToast('Chargement en cours…'); return; }
+  const withPreview = genre.tracks.filter(t => t.previewUrl);
+  if (!withPreview.length) { showToast('Pas d\'extraits disponibles'); return; }
+  Player.playQueue(withPreview);
+  showToast(`▶ ${genre.name}`);
 };
-window.playGenrePreview = playGenrePreview;
-window.showToast = showToast;
 
 // ═══════════════════════════════════════════════════════
-//  ÉCRAN HISTORIQUE
+//  RENDER HISTORIQUE
 // ═══════════════════════════════════════════════════════
 function renderHistoryScreen() {
-  const histContainer = $('history-grid');
-  if (histContainer) {
+  const hist = $('history-grid');
+  if (hist) {
     const data = State.recentTracks.length ? State.recentTracks : SpotifyManager.getMockRecentTracks();
-    histContainer.innerHTML = data.map(t => `
-      <div class="history-item" onclick="${t.previewUrl ? `playPreview('${esc(t.previewUrl)}','${esc(t.name)}','${esc(t.artist||'')}')` : `showToast('${esc(t.name)}')`}">
-        <div style="width:100%;aspect-ratio:1;border-radius:6px;overflow:hidden;background:${t.color||'#222'};position:relative">
-          ${t.image ? `<img src="${t.image}" alt="${esc(t.name)}" style="width:100%;height:100%;object-fit:cover">` : coverPlaceholder(t.name,'9px')}
-          ${t.previewUrl ? `<div style="position:absolute;bottom:3px;right:3px;width:14px;height:14px;background:rgba(0,0,0,.7);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="white" width="8" height="8"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>` : ''}
-        </div>
-        <div class="history-name">${t.name}</div>
-        <div class="history-artist">${t.artist||''}</div>
-      </div>
-    `).join('');
+    hist.innerHTML = data.map(t => trackGridHTML(t)).join('');
   }
-
-  const recoContainer = $('reco-grid');
-  if (recoContainer) {
+  const reco = $('reco-grid');
+  if (reco) {
     const data = State.recoTracks.length ? State.recoTracks : SpotifyManager.getMockRecoTracks();
-    recoContainer.innerHTML = data.map(t => `
-      <div class="history-item" onclick="${t.previewUrl ? `playPreview('${esc(t.previewUrl)}','${esc(t.name)}','${esc(t.artist||'')}')` : `showToast('${esc(t.name)}')`}">
-        <div style="width:100%;aspect-ratio:1;border-radius:6px;overflow:hidden;background:${t.color||'#333'};position:relative">
-          ${t.image ? `<img src="${t.image}" alt="${esc(t.name)}" style="width:100%;height:100%;object-fit:cover">` : coverPlaceholder(t.name,'9px')}
-          ${t.previewUrl ? `<div style="position:absolute;bottom:3px;right:3px;width:14px;height:14px;background:rgba(0,0,0,.7);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="white" width="8" height="8"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>` : ''}
-        </div>
-        <div class="history-name">${t.name}</div>
-        <div class="history-artist">${t.artist||''}</div>
-      </div>
-    `).join('');
+    reco.innerHTML = data.map(t => trackGridHTML(t)).join('');
   }
 }
 
 // ═══════════════════════════════════════════════════════
-//  ÉCRAN SPORT
+//  SPORT
 // ═══════════════════════════════════════════════════════
 function initSportScreen() {
   renderSteps(State.steps);
@@ -616,7 +677,7 @@ function initSportScreen() {
     const icon = L.divIcon({
       className:'',
       html:'<div style="width:14px;height:14px;background:#000;border-radius:50%;border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4)"></div>',
-      iconSize:[14,14],iconAnchor:[7,7],
+      iconSize:[14,14], iconAnchor:[7,7],
     });
     State.mapMarker   = L.marker([lat,lng],{icon}).addTo(State.map);
     State.mapPolyline = L.polyline([],{color:'#000',weight:3,opacity:.8}).addTo(State.map);
@@ -625,33 +686,32 @@ function initSportScreen() {
       State.mapMarker.setLatLng([pos.coords.latitude,pos.coords.longitude]);
     });
   }
-  setTimeout(()=>State.map.invalidateSize(),100);
+  setTimeout(() => State.map.invalidateSize(), 100);
   renderObjectives();
 }
 
 function updateMapTrace(positions) {
-  if (!State.map||!positions.length) return;
-  State.mapPolyline.setLatLngs(positions.map(p=>[p.lat,p.lng]));
-  const last=positions[positions.length-1];
+  if (!State.map || !positions.length) return;
+  State.mapPolyline.setLatLngs(positions.map(p => [p.lat,p.lng]));
+  const last = positions[positions.length-1];
   State.mapMarker.setLatLng([last.lat,last.lng]);
   State.map.panTo([last.lat,last.lng]);
 }
 
 function renderObjectives() {
-  const c = $('objectives-list'); if(!c) return;
+  const c = $('objectives-list'); if (!c) return;
   const objs = [
     {icon:'👟', text:`${State.stepsGoal.toLocaleString('fr-FR')} pas par jour`, done: State.steps>=State.stepsGoal},
-    {icon:'📍', text:'3 km minimum',   done: SensorsManager.getDistance()>=3000},
-    {icon:'⏱️', text:'1h de course',    done: false},
-    {icon:'🔥', text:'Brûler 300 kcal', done: false},
+    {icon:'📍', text:'3 km minimum',    done: SensorsManager.getDistance()>=3000},
+    {icon:'⏱️', text:'1h de course',     done: false},
+    {icon:'🔥', text:'Brûler 300 kcal',  done: false},
   ];
-  c.innerHTML = objs.map(o=>`
+  c.innerHTML = objs.map(o => `
     <div class="obj-item">
       <div class="obj-icon">${o.icon}</div>
       <div class="obj-text">${o.text}</div>
       <div class="obj-check ${o.done?'done':''}"></div>
-    </div>
-  `).join('');
+    </div>`).join('');
 }
 
 // ═══════════════════════════════════════════════════════
@@ -659,7 +719,7 @@ function renderObjectives() {
 // ═══════════════════════════════════════════════════════
 function initSettingsScreen() {
   updateSpotifySettingsUI(State.spotifyConnected);
-  setBleUI(State.watchConnected?'connected':'disconnected', State.watchName);
+  setBleUI(State.watchConnected ? 'connected' : 'disconnected', State.watchName);
   const slider = $('steps-goal-slider');
   const disp   = $('steps-goal-display');
   if (slider) slider.value = State.stepsGoal;
@@ -669,10 +729,11 @@ function initSettingsScreen() {
 on($('spotify-connect-btn'), 'click', async () => {
   if (State.spotifyConnected) {
     SpotifyManager.logout();
-    Preview.stop();
+    Player.stop();
     Object.assign(State, { spotifyConnected:false, recentTracks:[], recoTracks:[], playlists:[] });
     updateSpotifySettingsUI(false);
     showToast('Déconnecté de Spotify');
+    await loadDeezerFallback();
   } else {
     await SpotifyManager.login();
   }
@@ -684,16 +745,16 @@ function updateSpotifySettingsUI(connected) {
   if (!lbl||!btn) return;
   lbl.textContent = connected ? 'Connecté' : 'Non connecté';
   btn.textContent = connected ? 'Déconnecter' : 'Connecter';
-  btn.className   = 'settings-action-btn'+(connected?' connected':'');
+  btn.className   = 'settings-action-btn' + (connected ? ' connected' : '');
 }
 
 on($('toggle-gps'), 'change', e => {
   e.target.checked ? SensorsManager.startGps() : SensorsManager.stopGps();
-  showToast('GPS '+(e.target.checked?'activé':'désactivé'));
+  showToast('GPS ' + (e.target.checked ? 'activé' : 'désactivé'));
 });
 on($('toggle-pedometer'), 'change', e => {
   e.target.checked ? SensorsManager.startPedometer() : SensorsManager.stopPedometer();
-  showToast('Podomètre '+(e.target.checked?'activé':'désactivé'));
+  showToast('Podomètre ' + (e.target.checked ? 'activé' : 'désactivé'));
 });
 on($('toggle-ble'), 'change', e => {
   if (!e.target.checked && State.watchConnected) BluetoothManager.disconnect();
@@ -703,8 +764,8 @@ on($('steps-goal-slider'), 'input', e => {
   $('steps-goal-display').textContent = State.stepsGoal.toLocaleString('fr-FR');
 });
 on($('btn-logout'), 'click', () => {
-  SpotifyManager.logout(); BpmSimulator.stop(); Preview.stop();
-  Object.assign(State,{spotifyConnected:false,sessionActive:false,recentTracks:[],recoTracks:[],playlists:[]});
+  SpotifyManager.logout(); Player.stop(); BpmSimulator.stop();
+  Object.assign(State, {spotifyConnected:false, sessionActive:false, recentTracks:[], recoTracks:[], playlists:[]});
   navigateTo('login');
   showToast('Déconnecté');
 });
