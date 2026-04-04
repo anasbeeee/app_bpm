@@ -47,7 +47,9 @@
     } else if (code) {
       // Échange le code contre un token
       const CLIENT_ID    = 'bef3899241db4e618883042e808327a2';
-      const REDIRECT_URI = 'http://127.0.0.1:5500/callback.html';
+      const REDIRECT_URI = window.location.hostname === '127.0.0.1'
+        ? 'http://127.0.0.1:5500/callback.html'
+        : 'https://anasbeeee.github.io/app_bpm/callback.html';
       const verifier     = sessionStorage.getItem('pkce_verifier');
 
       fetch('https://accounts.spotify.com/api/token', {

@@ -7,12 +7,17 @@
 const SpotifyManager = (() => {
 
   const CLIENT_ID    = 'bef3899241db4e618883042e808327a2';
-  const REDIRECT_URI = 'http://127.0.0.1:5500/callback.html';
+  // Redirect dynamique : GitHub Pages en prod, 127.0.0.1 en local
+  const REDIRECT_URI = window.location.hostname === '127.0.0.1'
+    ? 'http://127.0.0.1:5500/callback.html'
+    : 'https://anasbeeee.github.io/app_bpm/callback.html';
   const SCOPES = [
     'user-read-email',
     'user-read-private',
     'user-read-recently-played',
     'user-top-read',
+    'user-read-playback-state',
+    'user-modify-playback-state',
     'playlist-modify-public',
     'playlist-modify-private',
   ].join(' ');
