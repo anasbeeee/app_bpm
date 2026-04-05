@@ -442,24 +442,40 @@ function launchSessionQueue() {
 // BPM 80-120 → mix pop / rnb
 // BPM > 120 → énergie (rap, électro)
 function buildQueueForBpm(bpm) {
-  const allTracks = getAllTracksWithPreview();
-  if (!allTracks.length) return [];
-
-  // Si on a des playlists par genre, on choisit selon le BPM
+  // 1. Écoutes récentes de l'utilisateur en priorité
+  const recentWithPreview = State.recentTracks.filter(t => t.previewUrl);
+  // 2. Recommandations basées sur ses goûts
+  const recoWithPreview   = State.recoTracks.filter(t => t.previewUrl);
+  // 3. Playlists par genre selon le BPM
+  let genreTracks = [];
   if (State.playlists.length) {
-    let targetGenre = null;
-    if (bpm < 80)       targetGenre = State.playlists.find(p => /bossa|jazz|chill|soul/i.test(p.name));
-    else if (bpm < 110) targetGenre = State.playlists.find(p => /pop|rnb|r&b/i.test(p.name));
-    else                targetGenre = State.playlists.find(p => /rap|electro|hip/i.test(p.name));
-
-    if (targetGenre?.tracks?.length) {
-      const withPreview = targetGenre.tracks.filter(t => t.previewUrl);
-      if (withPreview.length >= 3) return shuffle(withPreview);
-    }
+    let targetPlaylist = null;
+    if (bpm < 80)       targetPlaylist = State.playlists.find(p => /bossa|jazz|chill|soul|slow/i.test(p.name));
+    else if (bpm < 110) targetPlaylist = State.playlists.find(p => /pop|rnb|r&b/i.test(p.name));
+    else                targetPlaylist = State.playlists.find(p => /rap|electro|hip|dance/i.test(p.name));
+    if (!targetPlaylist) targetPlaylist = State.playlists[0];
+    genreTracks = (targetPlaylist?.tracks || []).filter(t => t.previewUrl);
   }
 
-  // Sinon : toutes les tracks mélangées
-  return shuffle(allTracks);
+  // Mélange en priorisant les goûts de l'utilisateur
+  // Structure : 50% écoutes récentes + 30% recos + 20% genre
+  const queue = [];
+  const recent = shuffle(recentWithPreview);
+  const recos  = shuffle(recoWithPreview);
+  const genres = shuffle(genreTracks);
+
+  // Entrelace les sources pour varier
+  const maxLen = Math.max(recent.length, recos.length, genres.length, 1);
+  for (let i = 0; i < maxLen; i++) {
+    if (i < recent.length) queue.push(recent[i]);
+    if (i < recos.length)  queue.push(recos[i]);
+    if (i < genres.length && i % 3 === 0) queue.push(genres[i]); // 1 genre pour 2 perso
+  }
+
+  // Si on a rien du tout → fallback toutes tracks
+  if (!queue.length) return shuffle(getAllTracksWithPreview());
+
+  return queue;
 }
 
 // Quand le BPM change de zone en session → adapte la musique
