@@ -305,7 +305,14 @@ async function loadSpotifyData() {
   const seedIds = recent.slice(0, 5).map(t => t.id).filter(Boolean);
   if (seedIds.length) {
     const recos = await SpotifyManager.getRecommendations(seedIds);
-    State.recoTracks = await DeezerManager.enrichWithPreviews(recos, 4);
+    if (recos.length) {
+      State.recoTracks = await DeezerManager.enrichWithPreviews(recos, 4);
+    } else {
+      // Fallback : chart Deezer si Spotify reco vide
+      State.recoTracks = await DeezerManager.getChart(16);
+    }
+  } else {
+    State.recoTracks = await DeezerManager.getChart(16);
   }
 
   // 3. Playlists par genre
