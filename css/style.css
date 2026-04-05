@@ -880,14 +880,14 @@ html, body {
    ============================================= */
 .history-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
   padding: 4px 16px 16px;
 }
-.history-item { cursor: pointer; }
-.history-item .album-art { width: 100%; aspect-ratio: 1; border-radius: var(--radius-sm); }
-.history-name   { font-size: 10px; font-weight: 500; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.history-artist { font-size: 9px; color: var(--gray-400); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-item { cursor: pointer; min-width: 0; }
+.history-item > div:first-child { width: 100%; aspect-ratio: 1; border-radius: var(--radius-sm); overflow: hidden; }
+.history-name   { font-size: 10px; font-weight: 500; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.history-artist { font-size: 9px; color: var(--gray-400); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 
 /* ─── Heart animation ─── */
 @keyframes heartbeat {

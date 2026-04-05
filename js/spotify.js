@@ -111,15 +111,39 @@ const SpotifyManager = (() => {
       try {
         const res  = await api(`/me/player/recently-played?limit=${limit}`);
         const seen = new Set();
-        return (res?.items || [])
+        const items = (res?.items || [])
           .filter(i => {
             if (seen.has(i.track.uri)) return false;
             seen.add(i.track.uri);
             return true;
           })
           .map(i => mapTrack(i.track));
+
+        // Si pas assez d'écoutes récentes → complète avec les top tracks
+        if (items.length < 8) {
+          const top = await this.getTopTracks(limit - items.length);
+          const existingUris = new Set(items.map(t => t.uri));
+          const extra = top.filter(t => !existingUris.has(t.uri));
+          return [...items, ...extra];
+        }
+        return items;
       } catch (e) {
         console.error('[Spotify] getRecentlyPlayed:', e.message);
+        // Fallback direct sur les top tracks
+        return this.getTopTracks(limit);
+      }
+    },
+
+    async getTopTracks(limit = 20) {
+      try {
+        // Essaie court terme d'abord, puis moyen terme
+        let res = await api(`/me/top/tracks?limit=${limit}&time_range=short_term`);
+        if (!res?.items?.length) {
+          res = await api(`/me/top/tracks?limit=${limit}&time_range=medium_term`);
+        }
+        return (res?.items || []).map(mapTrack);
+      } catch (e) {
+        console.error('[Spotify] getTopTracks:', e.message);
         return [];
       }
     },

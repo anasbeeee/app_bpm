@@ -60,94 +60,118 @@ function coverPlaceholder(name, fontSize = '11px') {
 //  PLAYER — enchaînement, BPM adaptatif, file de lecture
 // ═══════════════════════════════════════════════════════
 const Player = (() => {
-  let audio    = null;
-  const cbs    = new Set();
+  let audio     = null;
+  let queueMode = false; // true = session avec enchaînement, false = lecture unique
+  const cbs     = new Set();
 
   function emit(data) { cbs.forEach(fn => fn(data)); }
 
   function playAudio(url, info, onEnd) {
-    if (audio) { audio.pause(); audio.src = ''; }
+    // Arrête proprement l'audio précédent
+    if (audio) {
+      audio.pause();
+      audio.onended  = null;
+      audio.onerror  = null;
+      audio.src = '';
+      audio = null;
+    }
 
-    audio = new Audio(url);
-    audio.volume = 0.8;
-    audio.crossOrigin = 'anonymous';
+    const a = new Audio();
+    a.volume      = 0.8;
+    a.preload     = 'auto';
 
-    audio.addEventListener('canplay', () => {
-      audio.play().then(() => {
-        State.isPlaying      = true;
+    a.oncanplaythrough = () => {
+      a.play().then(() => {
+        audio = a;
+        State.isPlaying       = true;
         State.currentTrackInfo = info;
         emit({ playing: true, track: info });
         updateNowPlayingBar(info);
       }).catch(err => {
-        console.error('[Player]', err);
-        showToast('Autoplay bloqué — tape l\'écran pour lancer');
+        console.warn('[Player] autoplay bloqué:', err.message);
+        // L'audio est prêt, on attend l'interaction utilisateur
+        audio = a;
+        State.currentTrackInfo = info;
+        updateNowPlayingBar(info);
+        showToast('Appuie sur ▶ pour lancer la musique');
       });
-    });
+    };
 
-    audio.addEventListener('ended', () => {
+    a.onended = () => {
       State.isPlaying = false;
       emit({ playing: false, track: null });
-      if (onEnd) onEnd();
-    });
+      if (queueMode && onEnd) onEnd();
+      else updateNowPlayingBar(null);
+    };
 
-    audio.addEventListener('error', () => {
-      console.warn('[Player] Erreur audio, on passe au suivant');
-      if (onEnd) onEnd();
-    });
+    a.onerror = () => {
+      console.warn('[Player] Erreur audio, morceau suivant');
+      State.isPlaying = false;
+      if (queueMode && onEnd) setTimeout(onEnd, 300);
+    };
 
-    audio.load();
+    a.src = url;
+    a.load();
   }
 
   return {
-    // Joue un morceau unique (clic depuis liste)
+    // Joue un seul morceau (clic depuis liste) — pas d'enchaînement
     playOne(url, info) {
-      if (!url) { showToast('Pas d\'extrait disponible pour ce morceau'); return; }
+      if (!url) { showToast('Pas d\'extrait disponible'); return; }
+      queueMode = false;
       playAudio(url, info, null);
     },
 
-    // Lance une file de lecture (session)
+    // Lance une file avec enchaînement automatique (session)
     playQueue(tracks) {
       const withPreview = tracks.filter(t => t.previewUrl);
       if (!withPreview.length) { showToast('Aucun extrait disponible'); return; }
+      queueMode        = true;
       State.queue      = withPreview;
       State.queueIndex = 0;
       this._playIndex(0);
     },
 
     _playIndex(idx) {
-      if (idx >= State.queue.length) {
-        // Fin de la file → on reboucle
-        State.queueIndex = 0;
-        this._playIndex(0);
-        return;
-      }
-      State.queueIndex = idx;
-      const t = State.queue[idx];
+      if (!queueMode) return;
+      // Boucle en fin de file
+      const realIdx = idx % State.queue.length;
+      State.queueIndex = realIdx;
+      const t = State.queue[realIdx];
+      if (!t?.previewUrl) { this._playIndex(realIdx + 1); return; }
+
       playAudio(t.previewUrl, { name: t.name, artist: t.artist, image: t.image }, () => {
-        // Enchaîne au suivant automatiquement
-        setTimeout(() => this._playIndex(idx + 1), 500);
+        if (queueMode) this._playIndex(realIdx + 1);
       });
     },
 
     next() {
       if (!State.queue.length) return;
-      this._playIndex((State.queueIndex + 1) % State.queue.length);
+      this._playIndex(State.queueIndex + 1);
     },
 
     prev() {
       if (!State.queue.length) return;
-      this._playIndex((State.queueIndex - 1 + State.queue.length) % State.queue.length);
+      const idx = (State.queueIndex - 1 + State.queue.length) % State.queue.length;
+      this._playIndex(idx);
     },
 
-    pause()  { if (audio) { audio.pause(); State.isPlaying = false; emit({ playing: false }); } },
-    resume() { if (audio) { audio.play();  State.isPlaying = true;  emit({ playing: true  }); } },
+    pause()  {
+      if (audio && !audio.paused) { audio.pause(); State.isPlaying = false; emit({ playing: false }); }
+    },
+    resume() {
+      if (audio && audio.paused) {
+        audio.play().then(() => { State.isPlaying = true; emit({ playing: true }); }).catch(() => {});
+      }
+    },
     toggle() { audio?.paused ? this.resume() : this.pause(); },
 
     stop() {
-      if (audio) { audio.pause(); audio.src = ''; audio = null; }
-      State.isPlaying       = false;
+      queueMode = false;
+      if (audio) { audio.pause(); audio.onended = null; audio.onerror = null; audio.src = ''; audio = null; }
+      State.isPlaying        = false;
       State.currentTrackInfo = null;
-      State.queue           = [];
+      State.queue            = [];
       emit({ playing: false, track: null });
       updateNowPlayingBar(null);
     },
