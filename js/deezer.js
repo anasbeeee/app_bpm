@@ -81,7 +81,11 @@ const DeezerManager = (() => {
             const dz = await this.getPreviewForTrack(track.name, track.artist);
             if (dz?.previewUrl) {
               results[i + idx].previewUrl = dz.previewUrl;
-              results[i + idx].image      = results[i + idx].image || dz.image;
+              // Remplace l'image si elle est nulle ou vide
+              const currentImage = results[i + idx].image;
+              if (!currentImage || currentImage === '' || currentImage.includes('2a96cbd8b46e442fc41')) {
+                results[i + idx].image = dz.image;
+              }
             }
           } catch {}
         }));

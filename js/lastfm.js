@@ -1,7 +1,7 @@
 /**
- * BPM SYNC — LastFmManager
- * API Last.fm gratuite — écoutes récentes + artistes similaires
- * Auth via token web (redirect) ou mobile (pas besoin de secret)
+ * BPM SYNC — LastFmManager v2
+ * API Last.fm — écoutes récentes + recommandations personnalisées
+ * Images enrichies via Deezer (Last.fm images souvent vides)
  */
 
 const LastFmManager = (() => {
@@ -28,17 +28,34 @@ const LastFmManager = (() => {
     return res.json();
   }
 
-  // ─── Mapping track Last.fm → format BPM Sync ───
-  function mapTrack(t) {
-    const image = t.image?.find(i => i.size === 'large')?.['#text']
-               || t.image?.find(i => i.size === 'medium')?.['#text']
-               || null;
+  // ─── Extrait le nom d'artiste proprement ───
+  function artistName(artist) {
+    if (!artist) return '';
+    if (typeof artist === 'string') return artist;
+    if (typeof artist === 'object') return artist.name || artist['#text'] || '';
+    return String(artist);
+  }
+
+  // ─── Extrait la meilleure image Last.fm ───
+  function bestImage(images) {
+    if (!Array.isArray(images)) return null;
+    // Priorité : extralarge > large > medium
+    const order = ['extralarge', 'large', 'medium', 'small'];
+    for (const size of order) {
+      const img = images.find(i => i.size === size);
+      if (img && img['#text'] && img['#text'] !== '') return img['#text'];
+    }
+    return null;
+  }
+
+  // ─── Mapping track Last.fm ───
+  function mapTrack(t, forceArtist = null) {
     return {
       id:         null,
-      name:       t.name,
-      artist:     t.artist?.name || t.artist || '',
-      album:      t.album?.['#text'] || '',
-      image:      image && image !== '' ? image : null,
+      name:       String(t.name || 'Inconnu'),
+      artist:     forceArtist || artistName(t.artist),
+      album:      String(t.album?.['#text'] || ''),
+      image:      bestImage(t.image),
       uri:        null,
       previewUrl: null,
       color:      null,
@@ -55,33 +72,11 @@ const LastFmManager = (() => {
     },
 
     async login() {
-      // Redirige vers Last.fm pour l'auth
       const params = new URLSearchParams({
-        api_key:  API_KEY,
-        cb:       REDIRECT + '?service=lastfm',
+        api_key: API_KEY,
+        cb:      REDIRECT + '?service=lastfm',
       });
       window.location.href = AUTH_URL + '?' + params;
-    },
-
-    // Appelé depuis callback.html avec le token
-    async handleCallback(token) {
-      try {
-        // Génère la signature MD5 pour getSession
-        const sig = await md5(`api_key${API_KEY}methodauth.getSessiontoken${token}${API_KEY}`);
-        const res = await fetch(`${BASE}?method=auth.getSession&api_key=${API_KEY}&token=${token}&api_sig=${sig}&format=json`);
-        const data = await res.json();
-        if (data.session) {
-          sessionKey = data.session.key;
-          username   = data.session.name;
-          localStorage.setItem('lastfm_session',  sessionKey);
-          localStorage.setItem('lastfm_username', username);
-          return true;
-        }
-        return false;
-      } catch (e) {
-        console.error('[LastFM] handleCallback:', e);
-        return false;
-      }
     },
 
     logout() {
@@ -92,78 +87,88 @@ const LastFmManager = (() => {
 
     getUsername() { return username; },
 
-    // Écoutes récentes
+    // ─── Écoutes récentes ───
     async getRecentTracks(limit = 20) {
       if (!username) return [];
       try {
         const data = await api({ method: 'user.getrecenttracks', user: username, limit });
-        const tracks = (data.recenttracks?.track || [])
-          .filter(t => !t['@attr']?.nowplaying === false || true) // inclut "now playing"
-          .slice(0, limit);
-        return tracks.map(mapTrack);
+        const tracks = data.recenttracks?.track || [];
+        return tracks
+          .filter(t => t.name) // filtre les entrées vides
+          .slice(0, limit)
+          .map(t => mapTrack(t));
       } catch (e) {
         console.error('[LastFM] getRecentTracks:', e.message);
         return [];
       }
     },
 
-    // Top tracks de l'utilisateur
+    // ─── Top tracks ───
     async getTopTracks(limit = 20, period = '1month') {
       if (!username) return [];
       try {
         const data = await api({ method: 'user.gettoptracks', user: username, limit, period });
-        return (data.toptracks?.track || []).map(mapTrack);
+        return (data.toptracks?.track || []).map(t => mapTrack(t));
       } catch (e) {
         console.error('[LastFM] getTopTracks:', e.message);
         return [];
       }
     },
 
-    // Artistes similaires → recommandations
+    // ─── Recommandations via artistes similaires ───
     async getRecommendations(limit = 16) {
       if (!username) return [];
       try {
-        // Prend les top artistes
-        const topArtists = await api({ method: 'user.gettopartists', user: username, limit: 3, period: '1month' });
-        const artists = topArtists.topartists?.artist || [];
-        if (!artists.length) return [];
+        // Top artistes de l'utilisateur
+        const topArtistsData = await api({
+          method: 'user.gettopartists',
+          user:   username,
+          limit:  3,
+          period: '1month',
+        });
+        const topArtists = topArtistsData.topartists?.artist || [];
+        if (!topArtists.length) return [];
 
-        // Artistes similaires au top 1
-        const seed = artists[0].name;
-        const similar = await api({ method: 'artist.getsimilar', artist: seed, limit: 5 });
-        const simArtists = (similar.similarartists?.artist || []).map(a => a.name);
+        const seedArtist = artistName(topArtists[0]);
 
-        // Top tracks de chaque artiste similaire
-        const trackPromises = simArtists.slice(0, 4).map(async artist => {
-          const res = await api({ method: 'artist.gettoptracks', artist, limit: 4 });
-          return (res.toptracks?.track || []).map(t => ({
-            ...mapTrack(t),
-            artist,
-          }));
+        // Artistes similaires
+        const similarData = await api({
+          method: 'artist.getsimilar',
+          artist: seedArtist,
+          limit:  6,
+        });
+        const simArtists = (similarData.similarartists?.artist || [])
+          .map(a => artistName(a))
+          .filter(Boolean)
+          .slice(0, 5);
+
+        if (!simArtists.length) return [];
+
+        // Top tracks par artiste similaire
+        const trackPromises = simArtists.map(async artist => {
+          try {
+            const res = await api({ method: 'artist.gettoptracks', artist, limit: 4 });
+            return (res.toptracks?.track || []).map(t => mapTrack(t, artist));
+          } catch { return []; }
         });
 
         const results = await Promise.all(trackPromises);
         return results.flat().slice(0, limit);
+
       } catch (e) {
         console.error('[LastFM] getRecommendations:', e.message);
         return [];
       }
     },
 
-    // Top tags → playlists par genre
+    // ─── Top tags (genres) ───
     async getTopTags() {
       if (!username) return [];
       try {
         const data = await api({ method: 'user.gettoptags', user: username, limit: 4 });
-        return (data.toptags?.tag || []).map(t => t.name);
-      } catch (e) { return []; }
+        return (data.toptags?.tag || []).map(t => String(t.name));
+      } catch { return []; }
     },
   };
-
-  // MD5 simple pour la signature Last.fm
-  async function md5(str) {
-    const buf  = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
-  }
 
 })();
