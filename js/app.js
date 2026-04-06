@@ -219,13 +219,14 @@ on($('btn-continue'), 'click', () => {
 });
 on($('btn-spotify'),  'click', async () => { showToast('Redirection vers Spotify…'); await SpotifyManager.login(); });
 on($('btn-deezer'),   'click', () => showToast('Deezer — bientôt disponible'));
-on($('btn-youtube'),  'click', () => showToast('YouTube Music — bientôt disponible'));
+on($('btn-lastfm'),   'click', async () => { showToast('Redirection vers Last.fm…'); await LastFmManager.login(); });
 
 // ═══════════════════════════════════════════════════════
 //  ENTER APP
 // ═══════════════════════════════════════════════════════
-async function enterApp(withSpotify = false) {
+async function enterApp(withSpotify = false, withLastFm = false) {
   State.spotifyConnected = withSpotify;
+  State.lastfmConnected  = withLastFm;
   BpmSimulator.start();
   navigateTo('play');
   showToast('Chargement des musiques…');
@@ -233,6 +234,9 @@ async function enterApp(withSpotify = false) {
     if (withSpotify) {
       await loadSpotifyData();
       updateSpotifySettingsUI(true);
+    } else if (withLastFm) {
+      await loadLastFmData();
+      updateLastFmSettingsUI(true);
     } else {
       await loadDeezerData();
     }
@@ -247,36 +251,46 @@ async function enterApp(withSpotify = false) {
 //  CHARGEMENT DONNÉES
 // ═══════════════════════════════════════════════════════
 async function loadSpotifyData() {
-  // 1. Écoutes récentes Spotify → enrichies covers + previews Deezer
-  const recent = await SpotifyManager.getRecentlyPlayed(20);
-  if (recent.length) {
-    State.recentTracks = await DeezerManager.enrichWithPreviews(recent, 4);
-  } else {
-    // Fallback top tracks
-    const top = await SpotifyManager.getTopTracks(20);
-    State.recentTracks = top.length ? await DeezerManager.enrichWithPreviews(top, 4) : await DeezerManager.getChart(20);
+  let spotifyWorking = false;
+
+  // 1. Test rapide si Spotify fonctionne
+  try {
+    const recent = await SpotifyManager.getRecentlyPlayed(20);
+    if (recent.length) {
+      spotifyWorking = true;
+      // Enrichit avec covers + previews Deezer
+      State.recentTracks = await DeezerManager.enrichWithPreviews(recent, 4);
+
+      // Recommandations basées sur écoutes Spotify
+      const seedIds = recent.slice(0, 5).map(t => t.id).filter(Boolean);
+      if (seedIds.length) {
+        const recos = await SpotifyManager.getRecommendations(seedIds);
+        State.recoTracks = recos.length
+          ? await DeezerManager.enrichWithPreviews(recos, 4)
+          : await DeezerManager.getChart(16);
+      } else {
+        State.recoTracks = await DeezerManager.getChart(16);
+      }
+
+      // Genres depuis Spotify
+      const genres = await SpotifyManager.getTopGenres();
+      if (genres.length) {
+        State.playlists = await Promise.all(genres.map(async g => ({
+          ...g,
+          tracks: await DeezerManager.enrichWithPreviews(g.tracks || [], 3),
+        })));
+      } else {
+        await buildDeezerPlaylists();
+      }
+    }
+  } catch (e) {
+    console.warn('[Spotify] API indisponible, bascule sur Deezer:', e.message);
   }
 
-  // 2. Recommandations
-  const seedIds = State.recentTracks.slice(0, 5).map(t => t.id).filter(Boolean);
-  if (seedIds.length) {
-    const recos = await SpotifyManager.getRecommendations(seedIds);
-    State.recoTracks = recos.length
-      ? await DeezerManager.enrichWithPreviews(recos, 4)
-      : await DeezerManager.getChart(16);
-  } else {
-    State.recoTracks = await DeezerManager.getChart(16);
-  }
-
-  // 3. Playlists par genre
-  const genres = await SpotifyManager.getTopGenres();
-  if (genres.length) {
-    State.playlists = await Promise.all(genres.map(async g => ({
-      ...g,
-      tracks: await DeezerManager.enrichWithPreviews(g.tracks || [], 3),
-    })));
-  } else {
-    await buildDeezerPlaylists();
+  // Si Spotify a rien retourné → tout Deezer
+  if (!spotifyWorking || !State.recentTracks.length) {
+    console.log('[Data] Fallback Deezer complet');
+    await loadDeezerData();
   }
 }
 
@@ -289,6 +303,52 @@ async function loadDeezerData() {
   State.recentTracks = chart1;
   State.recoTracks   = chart2;
   await buildDeezerPlaylists();
+}
+
+async function loadLastFmData() {
+  showToast('Chargement de tes écoutes Last.fm…');
+
+  // 1. Écoutes récentes Last.fm → enrichies covers + previews Deezer
+  const recent = await LastFmManager.getRecentTracks(20);
+  if (recent.length) {
+    State.recentTracks = await DeezerManager.enrichWithPreviews(recent, 4);
+  } else {
+    const top = await LastFmManager.getTopTracks(20);
+    State.recentTracks = top.length
+      ? await DeezerManager.enrichWithPreviews(top, 4)
+      : await DeezerManager.getChart(20);
+  }
+
+  // 2. Recommandations basées sur les artistes similaires
+  const recos = await LastFmManager.getRecommendations(16);
+  State.recoTracks = recos.length
+    ? await DeezerManager.enrichWithPreviews(recos, 4)
+    : await DeezerManager.getChart(16);
+
+  // 3. Playlists par genre depuis les top tags
+  const tags = await LastFmManager.getTopTags();
+  if (tags.length) {
+    State.playlists = await Promise.all(tags.slice(0,4).map(async tag => {
+      const tracks = await DeezerManager.getTracksByGenre(tag, 15);
+      return {
+        name:   tag.charAt(0).toUpperCase() + tag.slice(1),
+        count:  tracks.length,
+        image:  tracks[0]?.image || null,
+        tracks,
+      };
+    }));
+  } else {
+    await buildDeezerPlaylists();
+  }
+}
+
+function updateLastFmSettingsUI(connected) {
+  const lbl = $('lastfm-status-label');
+  const btn = $('lastfm-connect-btn');
+  if (!lbl||!btn) return;
+  lbl.textContent = connected ? `Connecté (${LastFmManager.getUsername()})` : 'Non connecté';
+  btn.textContent = connected ? 'Déconnecter' : 'Connecter';
+  btn.className   = 'settings-action-btn' + (connected ? ' connected' : '');
 }
 
 async function buildDeezerPlaylists() {
@@ -695,7 +755,9 @@ on($('btn-logout'),'click',()=>{
 // ═══════════════════════════════════════════════════════
 (function init() {
   if (SpotifyManager.isLoggedIn()) {
-    enterApp(true);
+    enterApp(true, false);
+  } else if (LastFmManager.isLoggedIn()) {
+    enterApp(false, true);
   } else {
     navigateTo('login');
   }
