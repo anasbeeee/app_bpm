@@ -34,6 +34,7 @@
   <div class="spinner"></div>
   <div class="msg" id="msg">Connexion en cours…</div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/spark-md5/3.0.2/spark-md5.min.js"></script>
   <script>
     const params  = new URLSearchParams(window.location.search);
     const code    = params.get('code');
@@ -41,27 +42,28 @@
     const service = params.get('service');
     const error   = params.get('error');
 
+    const LASTFM_KEY    = '91ef066ae7f7f1aa0c16805cf5aeb921';
+    const LASTFM_SECRET = '5930fe56dc4da077215fbbc260d3d02f';
+    const SPOTIFY_ID    = 'bef3899241db4e618883042e808327a2';
+
     if (error) {
       document.getElementById('msg').textContent = 'Connexion annulée.';
       setTimeout(() => window.location.href = 'index.html', 1500);
 
     } else if (service === 'lastfm' && token) {
-      // Callback Last.fm
-      document.getElementById('msg').textContent = 'Connexion Last.fm en cours…';
-      const API_KEY = '83b3288bc8fa87c39dd8d40fcba8bc64';
+      document.getElementById('msg').textContent = 'Connexion Last.fm…';
 
-      // Pour Last.fm on a juste besoin du token + username via getSession
-      // On utilise SHA-256 comme signature (approximation)
-      const sigStr = `api_key${API_KEY}methodauth.getSessiontoken${token}${API_KEY}`;
-      crypto.subtle.digest('SHA-256', new TextEncoder().encode(sigStr))
-        .then(buf => Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join(''))
-        .then(sig => fetch(`https://ws.audioscrobbler.com/2.0/?method=auth.getSession&api_key=${API_KEY}&token=${token}&api_sig=${sig}&format=json`))
+      // Signature MD5 correcte : paramètres triés alphabétiquement + secret
+      const sigStr = `api_key${LASTFM_KEY}methodauth.getSessiontoken${token}${LASTFM_SECRET}`;
+      const sig    = SparkMD5.hash(sigStr);
+
+      fetch(`https://ws.audioscrobbler.com/2.0/?method=auth.getSession&api_key=${LASTFM_KEY}&token=${token}&api_sig=${sig}&format=json`)
         .then(r => r.json())
         .then(data => {
           if (data.session) {
             localStorage.setItem('lastfm_session',  data.session.key);
             localStorage.setItem('lastfm_username', data.session.name);
-            document.getElementById('msg').textContent = 'Last.fm connecté ✓';
+            document.getElementById('msg').textContent = `Bienvenue ${data.session.name} ✓`;
             setTimeout(() => window.location.href = 'index.html', 800);
           } else {
             document.getElementById('msg').textContent = 'Erreur Last.fm : ' + (data.message || 'inconnu');
@@ -74,9 +76,7 @@
         });
 
     } else if (code) {
-      // Callback Spotify
       document.getElementById('msg').textContent = 'Connexion Spotify en cours…';
-      const CLIENT_ID    = 'bef3899241db4e618883042e808327a2';
       const REDIRECT_URI = window.location.hostname === '127.0.0.1'
         ? 'http://127.0.0.1:5500/callback.html'
         : 'https://anasbeeee.github.io/app_bpm/callback.html';
@@ -89,7 +89,7 @@
           grant_type:    'authorization_code',
           code,
           redirect_uri:  REDIRECT_URI,
-          client_id:     CLIENT_ID,
+          client_id:     SPOTIFY_ID,
           code_verifier: verifier,
         }),
       })

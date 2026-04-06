@@ -6,7 +6,8 @@
 
 const LastFmManager = (() => {
 
-  const API_KEY    = '83b3288bc8fa87c39dd8d40fcba8bc64';
+  const API_KEY    = '91ef066ae7f7f1aa0c16805cf5aeb921';
+  const API_SECRET = '5930fe56dc4da077215fbbc260d3d02f';
   const BASE       = 'https://ws.audioscrobbler.com/2.0/';
   const AUTH_URL   = 'https://www.last.fm/api/auth/';
   const REDIRECT   = 'https://anasbeeee.github.io/app_bpm/callback.html';
