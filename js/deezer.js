@@ -35,11 +35,11 @@ const DeezerManager = (() => {
   // ─── Mapping track Deezer ───
   function mapTrack(t) {
     return {
-      id:         t.id,
-      name:       t.title,
-      artist:     t.artist?.name || '',
-      album:      t.album?.title || '',
-      image:      t.album?.cover_medium || t.album?.cover || null,
+      id:         t.id || null,
+      name:       String(t.title || t.name || 'Inconnu'),
+      artist:     String(t.artist?.name || t.artist || ''),
+      album:      String(t.album?.title || ''),
+      image:      (t.album?.cover_medium || t.album?.cover || null),
       previewUrl: t.preview || null,
       uri:        null,
       color:      null,

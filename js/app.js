@@ -42,8 +42,9 @@ function showToast(msg, duration = 2400) {
   setTimeout(() => t.classList.remove('show'), duration);
 }
 
-function esc(str) {
-  return (str||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+function esc(val) {
+  const str = (val == null ? '' : String(val));
+  return str.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
 }
 
 function coverPlaceholder(name, fontSize = '11px') {
